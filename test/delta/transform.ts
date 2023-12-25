@@ -118,6 +118,42 @@ describe('transform()', () => {
     expect(b2.transform(a2, false)).toEqual(expected2);
   });
 
+  it('should equal to each other', () => {
+    const a1 = new Delta().retain(3).insert('aa');
+    const b1 = new Delta().retain(3).insert('bb');
+
+    expect(a1.compose(a1.transform(b1, true))).toEqual(
+      b1.compose(b1.transform(a1, false)),
+    );
+  });
+
+  it('should equal to each other when a is delete op and b is retain', () => {
+    const a1 = new Delta().delete(4);
+    const b1 = new Delta().retain(5).insert('bb');
+
+    const expected1 = new Delta().retain(1).insert('bb');
+
+    expect(a1.transform(b1, true)).toEqual(expected1);
+  });
+
+  it('should equal to each other when a is delete op and b is insert', () => {
+    const a1 = new Delta().delete(4);
+    const b1 = new Delta().insert('bb');
+
+    const expected1 = new Delta().insert('bb');
+
+    expect(a1.transform(b1, true)).toEqual(expected1);
+  });
+
+  it('should equal to each other when a is delete op and b is retain', () => {
+    const a1 = new Delta().delete(4);
+    const b1 = new Delta().retain(3).insert('bb');
+
+    const expected1 = new Delta().insert('bb');
+
+    expect(a1.transform(b1, true)).toEqual(expected1);
+  });
+
   it('prepend + append', () => {
     const a1 = new Delta().insert('aa');
     const b1 = new Delta().retain(3).insert('bb');

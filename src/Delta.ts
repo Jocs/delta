@@ -71,6 +71,7 @@ class Delta {
     attributes?: AttributeMap | null,
   ): this {
     const newOp: Op = {};
+    // 插入空字符串，直接 return this 就行
     if (typeof arg === 'string' && arg.length === 0) {
       return this;
     }
@@ -82,10 +83,12 @@ class Delta {
     ) {
       newOp.attributes = attributes;
     }
+
     return this.push(newOp);
   }
 
   delete(length: number): this {
+    // 删除 0 长度，是无效操作
     if (length <= 0) {
       return this;
     }
@@ -110,11 +113,20 @@ class Delta {
     return this.push(newOp);
   }
 
+  /**
+   * 1. 对相同的操作进行合并，如 lastOp 和 newOp 都是 delete 操作，需要合并。对于 insert 和 retain 操作，如果 attributes 相同，也需要合并
+   * 2. 如果上一个操作时 delete，newOp 是 insert 操作，哪个操作先执行后执行结果都是一样的，倾向于 insert 操作限制性，所以在 push insert 操作时，将
+   * 其放在 delete 操作之前
+   * 3. 不是上面两种 case，那么就直接将 newOp append 到 ops 最后
+   */
   push(newOp: Op): this {
     let index = this.ops.length;
     let lastOp = this.ops[index - 1];
     newOp = cloneDeep(newOp);
+
+    // 在什么 case 下，lastOp 不是 object? 当 ops 中还没有操作的时候，lastOp 为 undefined
     if (typeof lastOp === 'object') {
+      // 如果都是 delete 操作，将两个操作合并成一个操作，delete 长度取两次操作长度之和
       if (
         typeof newOp.delete === 'number' &&
         typeof lastOp.delete === 'number'
@@ -132,6 +144,7 @@ class Delta {
           return this;
         }
       }
+      // 如果 attributes 想通，那么针对 insert 和 retain 操作，也需要进行合并
       if (isEqual(newOp.attributes, lastOp.attributes)) {
         if (
           typeof newOp.insert === 'string' &&
@@ -162,6 +175,7 @@ class Delta {
     return this;
   }
 
+  // 删除最后一个没有意义的 retain 操作
   chop(): this {
     const lastOp = this.ops[this.ops.length - 1];
     if (lastOp && typeof lastOp.retain === 'number' && !lastOp.attributes) {
@@ -199,6 +213,7 @@ class Delta {
     return this.ops.reduce(predicate, initialValue);
   }
 
+  // 文档里面没有这个方法？内部也没有调用。。。
   changeLength(): number {
     return this.reduce((length, elem) => {
       if (elem.insert) {
@@ -216,6 +231,7 @@ class Delta {
     }, 0);
   }
 
+  // 我们也需要一个 slice 方法，来获取制定范围内的 body
   slice(start = 0, end = Infinity): Delta {
     const ops = [];
     const iter = new OpIterator(this.ops);
@@ -233,11 +249,13 @@ class Delta {
     return new Delta(ops);
   }
 
+  // 将多个 delta 合并成一个 delta
   compose(other: Delta): Delta {
     const thisIter = new OpIterator(this.ops);
     const otherIter = new OpIterator(other.ops);
     const ops = [];
     const firstOther = otherIter.peek();
+
     if (
       firstOther != null &&
       typeof firstOther.retain === 'number' &&
@@ -256,7 +274,9 @@ class Delta {
       }
     }
     const delta = new Delta(ops);
+
     while (thisIter.hasNext() || otherIter.hasNext()) {
+      // 如果两个 operation 分别是 insert 和 delete，先 push insert 操作，再 push delete 操作
       if (otherIter.peekType() === 'insert') {
         delta.push(otherIter.next());
       } else if (thisIter.peekType() === 'delete') {
@@ -265,12 +285,16 @@ class Delta {
         const length = Math.min(thisIter.peekLength(), otherIter.peekLength());
         const thisOp = thisIter.next(length);
         const otherOp = otherIter.next(length);
+
         if (otherOp.retain) {
           const newOp: Op = {};
+
           if (typeof thisOp.retain === 'number') {
+            // retain + retain
             newOp.retain =
               typeof otherOp.retain === 'number' ? length : otherOp.retain;
           } else {
+            // (insert or retain object)  + retain
             if (typeof otherOp.retain === 'number') {
               if (thisOp.retain == null) {
                 newOp.insert = thisOp.insert;
@@ -314,16 +338,18 @@ class Delta {
           }
 
           // Other op should be delete, we could be an insert or retain
-          // Insert + delete cancels out
+          // Insert + delete cancels out：A 操作是 insert 操作，B 操作是删除操作，那么正好抵消
         } else if (
           typeof otherOp.delete === 'number' &&
           (typeof thisOp.retain === 'number' ||
             (typeof thisOp.retain === 'object' && thisOp.retain !== null))
         ) {
+          // 如果 otherOp 是删除操作，thisOp 是 delete 操作，那么执行删除操作就行
           delta.push(otherOp);
         }
       }
     }
+
     return delta.chop();
   }
 
@@ -431,11 +457,19 @@ class Delta {
     }
   }
 
+  /**
+   * invert 操作步骤：
+   * 1. 迭代 operation，如果是 insert 操作，就生成反向的 delete 操作，如果是简单的 retain 操作，保留操作。如果是 delete 和 有 attributes 的 retain 操作
+   * 需要根据 base 的数据，找到其 invert 操作。delete 操作的反向操作时 insert 操作，retain 反向操作依然是 retain 操作，但是需要对其 attributes 进行 invert
+   */
   invert(base: Delta): Delta {
     const inverted = new Delta();
+
     this.reduce((baseIndex, op) => {
+      // insert 的 revert 操作就是 delete 操作
       if (op.insert) {
         inverted.delete(Op.length(op));
+        // 只是移动光标的 retain，其 revert 操作也是 retain 操作
       } else if (typeof op.retain === 'number' && op.attributes == null) {
         inverted.retain(op.retain);
         return baseIndex + op.retain;
@@ -469,20 +503,27 @@ class Delta {
       }
       return baseIndex;
     }, 0);
+
     return inverted.chop();
   }
 
+  /**
+   * transform: a.compose(a.transform(b, true)) === b.compose(b.transform(a, false))
+   */
   transform(index: number, priority?: boolean): number;
   transform(other: Delta, priority?: boolean): Delta;
   transform(arg: number | Delta, priority = false): typeof arg {
     priority = !!priority;
+    // transform 光标位置
     if (typeof arg === 'number') {
       return this.transformPosition(arg, priority);
     }
+
     const other: Delta = arg;
     const thisIter = new OpIterator(this.ops);
     const otherIter = new OpIterator(other.ops);
     const delta = new Delta();
+
     while (thisIter.hasNext() || otherIter.hasNext()) {
       if (
         thisIter.peekType() === 'insert' &&
@@ -540,6 +581,7 @@ class Delta {
         }
       }
     }
+
     return delta.chop();
   }
 
